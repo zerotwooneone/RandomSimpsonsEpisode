@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using AngleSharp;
 using AngleSharp.Dom;
@@ -14,8 +15,6 @@ namespace randomSimpsonsEpisode
     {
         static void Main(string[] args)
         {
-            Console.WriteLine("Hello World!");
-
             var prog = new Program();
 
             var random = prog.GetRandom();
@@ -60,12 +59,12 @@ namespace randomSimpsonsEpisode
 
         private IEnumerable<Episode> GetEpisodes(IConfiguration configuration, Season season)
         {
-            var seasonFilePath = GetSeasonFilePath(season.Text); 
+            var seasonFilePath = GetSeasonFilePath(season.Text);
             var seasonFile = new FileInfo(seasonFilePath);
             var episodes = GetEpisodesFromFile(seasonFile);
             if (episodes == null)
             {
-                episodes = GetEpisodesFromOnline(configuration, season.Url);
+                episodes = season.Episodes ?? GetEpisodesFromOnline(configuration, season.Url);
                 WriteSeasonFile(episodes, seasonFile);
             }
             return episodes;
@@ -112,7 +111,7 @@ namespace randomSimpsonsEpisode
             var newName = String.Join("_", splitText).TrimEnd('.');
             return Path.Combine(AppPath, newName);
         }
-        
+
         private IEnumerable<Episode> GetEpisodesFromOnline(IConfiguration configuration, string seasonUrl)
         {
             // This CSS selector gets the desired content
@@ -130,6 +129,7 @@ namespace randomSimpsonsEpisode
         {
             var seasonArray = seasons.ToArray();
             var index = random.Next(seasonArray.Length);
+
             return seasonArray[index];
         }
 
@@ -137,7 +137,7 @@ namespace randomSimpsonsEpisode
         {
             var seasonsFile = new FileInfo(SeasonsPath);
             var seasons = GetSeasonsFromFile(seasonsFile);
-
+            
             if (seasons == null)
             {
                 seasons = GetSeasonsFromOnline(config);
@@ -169,14 +169,75 @@ namespace randomSimpsonsEpisode
         private IEnumerable<Season> GetSeasonsFromOnline(IConfiguration config)
         {
             // This CSS selector gets the desired content
-            var cellSelector = "ul > li a[title^='The Simpsons']";
+            const string cellSelector = "ul > li a[title^='The Simpsons']";
             // Perform the query to get all cells with the content
             IHtmlCollection<IElement> cells = GetSeasonDocument(config, "https://www.watchcartoononline.io/cartoon-list").Result.QuerySelectorAll(cellSelector);
             // We are only interested in the text - select it with LINQ
-            var seasons = cells.Select(m => new Season { Text = m.TextContent, Url = m.GetAttribute("href") });
+            var seasons = cells.SelectMany(m =>
+            {
+                var href = m.GetAttribute("href");
+                return m.TextContent == "The Simpsons" ? GetSeasonsFromOnlineSpecialCase(config, href) :
+                new[] { new Season { Text = m.TextContent, Url = href } };
+            });
 
-            //Write(string.Join(Environment.NewLine, seasons.Select(s => s.Text)));
             return seasons;
+        }
+
+        private IEnumerable<Season> GetSeasonsFromOnlineSpecialCase(IConfiguration config, string parentUrl)
+        {
+            const string cellSelector = "ul > li > a[title^='Watch The Simpsons']";
+            IHtmlCollection<IElement> cells = GetSeasonDocument(config, parentUrl).Result
+                .QuerySelectorAll(cellSelector);
+            var seasons = new Dictionary<string, Season>();
+            foreach (var a in cells)
+            {
+                string textContent = a.TextContent;
+                if (textContent == "The Simpsons Movie") continue;
+
+                const string seasonEpisodePattern =
+                    @"The Simpsons Season ([0-9]+) Episode ([0-9]+) – (.*)"; 
+                var match = Regex.Match(textContent, seasonEpisodePattern);
+                string seasonNumberText;
+                string episodeNumberText;
+                string episodeName;
+                if (match.Success)
+                {
+                    seasonNumberText = match.Groups[1].Value;
+                    episodeNumberText = match.Groups[2].Value;
+                    episodeName = match.Groups[3].Value;
+                }
+                else
+                {
+                    const string concatSeasonEpisodePattern = @"The Simpsons Episode ([0-9])([0-9][0-9]) (.*)";
+                    match = Regex.Match(textContent, concatSeasonEpisodePattern);
+                    if (match.Success)
+                    {
+                        seasonNumberText = match.Groups[1].Value;
+                        episodeNumberText = match.Groups[2].Value;
+                        episodeName = match.Groups[3].Value;
+                    }
+                    else
+                    {
+                        throw new Exception("Unexpected episode format.");
+                    }
+                }
+                var href = a.GetAttribute("href");
+                var episode = new Episode {Text = episodeName, Url = href};
+                Season season;
+                if (seasons.ContainsKey(seasonNumberText))
+                {
+                    season = seasons[seasonNumberText];
+                    var episodes = season.Episodes.ToList();
+                    episodes.Add(episode);
+                    season.Episodes = episodes;
+                }
+                else
+                {
+                    season = new Season {Text = $"The Simpsons Season {seasonNumberText}", Episodes = new[] {episode}};
+                    seasons[seasonNumberText] = season;
+                }
+            }
+            return seasons.Values;
         }
 
         private IEnumerable<Season> GetSeasonsFromFile(FileInfo seasonsFile)
@@ -238,7 +299,16 @@ namespace randomSimpsonsEpisode
     public class Season
     {
         public string Text { get; set; }
+
+        /// <summary>
+        /// This will be null for seasons (6+) which do not have their own url.
+        /// </summary>
         public string Url { get; set; }
+
+        /// <summary>
+        /// This will be null for seasons (1-6) which we have to visit the url to get episodes.
+        /// </summary>
+        public IEnumerable<Episode> Episodes { get; set; }
     }
 
     public class Episode
