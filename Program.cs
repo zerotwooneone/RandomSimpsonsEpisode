@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -22,10 +21,7 @@ namespace randomSimpsonsEpisode
             // Setup the configuration to support document loading
             var config = Configuration.Default.WithDefaultLoader();
 
-            var seasons = prog.GetSeasons(config);
-            var season = prog.GetRandomSeason(random, seasons);
-
-            var episodes = prog.GetEpisodes(config, season);
+            var episodes = prog.GetEpisodes(config);
             var episode = prog.GetRandomEpisode(random, episodes);
 
             prog.LaunchBrowser(episode.Url);
@@ -34,6 +30,7 @@ namespace randomSimpsonsEpisode
 
         private void LaunchBrowser(string url)
         {
+            Write($"Loading: {url}");
             System.Diagnostics.Process.Start("cmd", $"/C start {url}"); //this is windows-only, needs work
         }
 
@@ -49,7 +46,7 @@ namespace randomSimpsonsEpisode
             AppPath = Path.Combine(Environment.GetEnvironmentVariable("LocalAppData"), "RandomSimpsonsEpisode");
             _invalidPathChars = Path.GetInvalidPathChars();
             SeedPath = Path.Combine(AppPath, "random.seed");
-            SeasonsPath = Path.Combine(AppPath, "seasons.json");
+            EpisodesPath = Path.Combine(AppPath, "episodes.json");
 
             if (!Directory.Exists(AppPath))
             {
@@ -57,20 +54,21 @@ namespace randomSimpsonsEpisode
             }
         }
 
-        private IEnumerable<Episode> GetEpisodes(IConfiguration configuration, Season season)
+        private IEnumerable<Episode> GetEpisodes(IConfiguration configuration)
         {
-            var seasonFilePath = GetSeasonFilePath(season.Text);
-            var seasonFile = new FileInfo(seasonFilePath);
-            var episodes = GetEpisodesFromFile(seasonFile);
+            var episodesFile = new FileInfo(EpisodesPath);
+            var episodes = GetEpisodesFromFile(episodesFile);
             if (episodes == null)
             {
-                episodes = season.Episodes ?? GetEpisodesFromOnline(configuration, season.Url);
-                WriteSeasonFile(episodes, seasonFile);
+                Write("Cache not found. Building cache...");
+                var seasons = GetSeasonsFromOnline(configuration);
+                episodes = seasons.SelectMany(s => s.Episodes ?? GetEpisodesFromOnline(configuration, s.Url));
+                WriteEpisodesFile(episodes, episodesFile);
             }
             return episodes;
         }
 
-        private void WriteSeasonFile(IEnumerable<Episode> episodes, FileInfo seasonFile)
+        private void WriteEpisodesFile(IEnumerable<Episode> episodes, FileInfo seasonFile)
         {
             try
             {
@@ -88,16 +86,17 @@ namespace randomSimpsonsEpisode
             }
         }
 
-        private IEnumerable<Episode> GetEpisodesFromFile(FileInfo seasonFile)
+        private IEnumerable<Episode> GetEpisodesFromFile(FileInfo episodesFile)
         {
-            Write("Looking for cached season");
-            seasonFile.Refresh();
-            if (!seasonFile.Exists)
+            Write("Looking for cached episodes");
+            episodesFile.Refresh();
+            if (!episodesFile.Exists)
             {
+                Write($"Episodes not found at: {episodesFile.FullName}");
                 return null;
             }
-            Write($"Cache found: {seasonFile.LastWriteTime}");
-            using (var streamReader = seasonFile.OpenText())
+            Write($"Cache found: {episodesFile.LastWriteTime}");
+            using (var streamReader = episodesFile.OpenText())
             {
                 var text = streamReader.ReadToEnd();
                 var episodes = JsonConvert.DeserializeObject<Episode[]>(text);
@@ -105,15 +104,9 @@ namespace randomSimpsonsEpisode
             }
         }
 
-        private string GetSeasonFilePath(string seasonText)
-        {
-            var splitText = seasonText.Split(_invalidPathChars, StringSplitOptions.RemoveEmptyEntries);
-            var newName = String.Join("_", splitText).TrimEnd('.');
-            return Path.Combine(AppPath, newName);
-        }
-
         private IEnumerable<Episode> GetEpisodesFromOnline(IConfiguration configuration, string seasonUrl)
         {
+            Write("Getting one season's episodes from online...");
             // This CSS selector gets the desired content
             var cellSelector = "ul > li > a[title^='Watch']";
             // Perform the query to get all cells with the content
@@ -125,49 +118,9 @@ namespace randomSimpsonsEpisode
             return episodes;
         }
 
-        private Season GetRandomSeason(Random random, IEnumerable<Season> seasons)
-        {
-            var seasonArray = seasons.ToArray();
-            var index = random.Next(seasonArray.Length);
-
-            return seasonArray[index];
-        }
-
-        private IEnumerable<Season> GetSeasons(IConfiguration config)
-        {
-            var seasonsFile = new FileInfo(SeasonsPath);
-            var seasons = GetSeasonsFromFile(seasonsFile);
-            
-            if (seasons == null)
-            {
-                seasons = GetSeasonsFromOnline(config);
-                WriteSeasonsFile(seasons, seasonsFile);
-            }
-            return seasons;
-        }
-
-        private void WriteSeasonsFile(IEnumerable<Season> seasons, FileInfo seasonsFile)
-        {
-            try
-            {
-                var array = seasons.ToArray();
-
-                var seasonJson = JsonConvert.SerializeObject(array);
-
-                using (var streamWriter = seasonsFile.CreateText())
-                {
-                    streamWriter.Write(seasonJson);
-                }
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine(e);
-                throw;
-            }
-        }
-
         private IEnumerable<Season> GetSeasonsFromOnline(IConfiguration config)
         {
+            Write("Getting seasons from online...");
             // This CSS selector gets the desired content
             const string cellSelector = "ul > li a[title^='The Simpsons']";
             // Perform the query to get all cells with the content
@@ -195,7 +148,7 @@ namespace randomSimpsonsEpisode
                 if (textContent == "The Simpsons Movie") continue;
 
                 const string seasonEpisodePattern =
-                    @"The Simpsons Season ([0-9]+) Episode ([0-9]+) – (.*)"; 
+                    @"The Simpsons Season ([0-9]+) Episode ([0-9]+) – (.*)";
                 var match = Regex.Match(textContent, seasonEpisodePattern);
                 string seasonNumberText;
                 string episodeNumberText;
@@ -222,7 +175,7 @@ namespace randomSimpsonsEpisode
                     }
                 }
                 var href = a.GetAttribute("href");
-                var episode = new Episode {Text = episodeName, Url = href};
+                var episode = new Episode { Text = episodeName, Url = href };
                 Season season;
                 if (seasons.ContainsKey(seasonNumberText))
                 {
@@ -233,28 +186,11 @@ namespace randomSimpsonsEpisode
                 }
                 else
                 {
-                    season = new Season {Text = $"The Simpsons Season {seasonNumberText}", Episodes = new[] {episode}};
+                    season = new Season { Text = $"The Simpsons Season {seasonNumberText}", Episodes = new[] { episode } };
                     seasons[seasonNumberText] = season;
                 }
             }
             return seasons.Values;
-        }
-
-        private IEnumerable<Season> GetSeasonsFromFile(FileInfo seasonsFile)
-        {
-            Write("Looking for cached seasons");
-            seasonsFile.Refresh();
-            if (!seasonsFile.Exists)
-            {
-                return null;
-            }
-            Write($"Cache found :{seasonsFile.LastWriteTime}");
-            using (var streamReader = seasonsFile.OpenText())
-            {
-                var text = streamReader.ReadToEnd();
-                var seasons = JsonConvert.DeserializeObject<Season[]>(text);
-                return seasons;
-            }
         }
 
         private void Write(string message)
@@ -264,7 +200,7 @@ namespace randomSimpsonsEpisode
 
 
 
-        public string SeasonsPath { get; }
+        public string EpisodesPath { get; }
 
         public string SeedPath { get; }
 
