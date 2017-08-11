@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using AngleSharp;
 using AngleSharp.Dom;
@@ -12,6 +13,8 @@ namespace randomSimpsonsEpisode
 {
     class Program
     {
+        private static readonly TimeSpan AllowCancelKeypressTimespan = TimeSpan.FromMilliseconds(300);
+
         static void Main(string[] args)
         {
             var prog = new Program();
@@ -22,9 +25,24 @@ namespace randomSimpsonsEpisode
             var config = Configuration.Default.WithDefaultLoader();
 
             var episodes = prog.GetEpisodes(config);
-            var episode = prog.GetRandomEpisode(random, episodes);
 
-            prog.LaunchBrowser(episode.Url);
+            Console.CancelKeyPress += delegate (object sender, ConsoleCancelEventArgs e)
+            {
+                _keepRunning = false;
+            };
+
+            while (_keepRunning)
+            {
+                var episode = prog.GetRandomEpisode(random, episodes);
+
+                prog.LaunchBrowser(episode.Url);
+
+                prog.Write("Press enter to load another or [CTRL] + [C] to quit");
+                Console.ReadLine();
+                Thread.Sleep(AllowCancelKeypressTimespan); //this allows the cancel keypress event to fire before we reach the top of the loop
+
+            }
+
 
         }
 
@@ -62,7 +80,9 @@ namespace randomSimpsonsEpisode
             {
                 Write("Cache not found. Building cache...");
                 var seasons = GetSeasonsFromOnline(configuration);
-                episodes = seasons.SelectMany(s => s.Episodes ?? GetEpisodesFromOnline(configuration, s.Url));
+                episodes = seasons
+                    .SelectMany(s => s.Episodes ?? GetEpisodesFromOnline(configuration, s.Url))
+                    .ToArray();
                 WriteEpisodesFile(episodes, episodesFile);
             }
             return episodes;
@@ -207,6 +227,7 @@ namespace randomSimpsonsEpisode
         public string AppPath { get; }
 
         private readonly char[] _invalidPathChars;
+        private static volatile bool _keepRunning = true;
 
         public Random GetRandom()
         {
